@@ -491,10 +491,12 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
             udp_inner,
         );
     } else {
-        f.render_widget(
-            Paragraph::new("Packet loss probe starts after upload phase..."),
-            udp_inner,
-        );
+        let msg = if state.phase == crate::model::Phase::PacketLoss {
+            "Packet loss probe starting..."
+        } else {
+            "Packet loss probe starts after upload phase..."
+        };
+        f.render_widget(Paragraph::new(msg), udp_inner);
     }
 
     // Network Information and Keyboard Shortcuts side-by-side

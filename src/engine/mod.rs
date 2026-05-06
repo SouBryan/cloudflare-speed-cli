@@ -355,13 +355,9 @@ impl TestEngine {
             cancel.clone(),
         )
         .await?;
-
-        event_tx
-            .send(TestEvent::PhaseStarted {
-                phase: Phase::PacketLoss,
-            })
-            .await
-            .ok();
+        // Note: PhaseStarted::PacketLoss is emitted from inside the upload function
+        // the moment its tick loop ends, so the dashboard can switch immediately
+        // without waiting for upload-task drain.
 
         let mut experimental_udp = None;
         let mut udp_error = None;
