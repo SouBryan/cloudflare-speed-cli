@@ -1,5 +1,6 @@
 mod cli;
 mod engine;
+mod event_format;
 mod metrics;
 mod model;
 mod network;

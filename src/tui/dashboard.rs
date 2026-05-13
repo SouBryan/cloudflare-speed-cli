@@ -1,10 +1,13 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::Color,
     style::Style,
     symbols,
     text::{Line, Span},
-    widgets::{Axis, Block, Borders, Dataset, GraphType, Paragraph, Sparkline},
+    widgets::{
+        Axis, Block, Borders, Dataset, GraphType, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Sparkline,
+    },
     Frame,
 };
 
@@ -55,7 +58,12 @@ fn quality_label_color(label: &str) -> Color {
 pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
     // Small terminal: keep the compact dashboard (gauges + sparklines).
     // Large terminal: show full charts (like the website) alongside the live cards.
-    if area.height < 28 {
+    // Total fixed-height rows in the full dashboard:
+    //   13 (throughput) + 10 (latency) + 3 (UDP) + 5 (status) = 31
+    // We need at least ~3 rows for the Network Info / Test Activity row,
+    // so fall back to the compact layout below 34 rows. Otherwise the
+    // Status panel gets clipped at the bottom.
+    if area.height < 34 {
         return draw_dashboard_compact(area, f, state);
     }
 
@@ -502,7 +510,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
     // Network Information and Keyboard Shortcuts side-by-side
     let info_row = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
         .split(main[3]);
 
     // Network Information panel (left)
@@ -674,51 +682,65 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
     );
     f.render_widget(network_info, info_row[0]);
 
-    // Keyboard Shortcuts panel (right)
-    let shortcuts_lines = vec![
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("q", Style::default().fg(Color::Magenta)),
-            Span::raw("     Quit"),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("r", Style::default().fg(Color::Magenta)),
-            Span::raw("     Rerun test"),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("p", Style::default().fg(Color::Magenta)),
-            Span::raw("     Pause/Resume"),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("s", Style::default().fg(Color::Magenta)),
-            Span::raw("     Save JSON"),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("a", Style::default().fg(Color::Magenta)),
-            Span::raw("     Toggle auto-save"),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("tab", Style::default().fg(Color::Magenta)),
-            Span::raw("   Switch tabs"),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("?", Style::default().fg(Color::Magenta)),
-            Span::raw("     Help"),
-        ]),
-    ];
+    // Test Activity panel (right): renders the tail of the rolling event log
+    // — same lines text mode (`--text`) prints to stderr, single source of
+    // truth via `crate::event_format::format_event_lines`. Scroll with
+    // ↑/↓/j/k and PgUp/PgDn while on the Dashboard tab.
+    let title = if state.dashboard_log_scroll > 0 {
+        format!(
+            "Test Activity  (scrolled -{}, ↓ to follow)",
+            state.dashboard_log_scroll
+        )
+    } else {
+        "Test Activity  (↑↓/PgUp/PgDn to scroll)".to_string()
+    };
+    let panel = Block::default().borders(Borders::ALL).title(title);
+    let inner = panel.inner(info_row[1]);
+    let visible_rows = inner.height as usize;
 
-    let shortcuts = Paragraph::new(shortcuts_lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Keyboard Shortcuts"),
-    );
-    f.render_widget(shortcuts, info_row[1]);
+    let activity_lines: Vec<Line> = if state.text_log.is_empty() {
+        vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  No run yet — press 'r' to start",
+                Style::default().fg(Color::Gray),
+            )),
+        ]
+    } else {
+        let total = state.text_log.len();
+        // scroll == 0 → show newest visible_rows lines.
+        // scroll == N → window ends N lines before the newest.
+        let end = total.saturating_sub(state.dashboard_log_scroll);
+        let start = end.saturating_sub(visible_rows);
+        state.text_log[start..end]
+            .iter()
+            .map(|s| Line::raw(s.clone()))
+            .collect()
+    };
+
+    let activity = Paragraph::new(activity_lines).block(panel);
+    f.render_widget(activity, info_row[1]);
+
+    // Scrollbar on the right edge of the Test Activity panel, only when the
+    // log overflows the visible area.
+    let total = state.text_log.len();
+    if total > visible_rows {
+        let max_scroll = total.saturating_sub(visible_rows);
+        // Scrollbar position is 0 at the top and `max_scroll` at the bottom.
+        // Our `dashboard_log_scroll` is 0 at the bottom (newest), so flip it.
+        let position = max_scroll.saturating_sub(state.dashboard_log_scroll);
+        let mut scrollbar_state = ScrollbarState::new(max_scroll).position(position);
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓")),
+            info_row[1].inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut scrollbar_state,
+        );
+    }
 
     // Status panel (full width at bottom)
     let mut status_lines = vec![Line::from(vec![

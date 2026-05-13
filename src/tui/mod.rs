@@ -271,6 +271,8 @@ pub async fn run(args: Cli) -> Result<()> {
                                 state.ip_comparison = None;
                                 state.traceroute_summary = None;
                                 state.traceroute_hops.clear();
+                                state.text_log.clear();
+                                state.dashboard_log_scroll = 0;
                                 run_ctx = Some(start_run(&args).await?);
                             }
                         }
@@ -339,10 +341,19 @@ pub async fn run(args: Cli) -> Result<()> {
                                 if state.history_selected > 0 {
                                     state.history_selected -= 1;
                                 }
+                            } else if state.tab == 0 {
+                                // Dashboard: scroll Test Activity log back one line.
+                                let max_scroll = state.text_log.len().saturating_sub(1);
+                                state.dashboard_log_scroll =
+                                    (state.dashboard_log_scroll + 1).min(max_scroll);
                             }
                         }
                         (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
-                            if state.tab == 1 && !state.history.is_empty() {
+                            if state.tab == 0 {
+                                // Dashboard: scroll Test Activity log forward one line.
+                                state.dashboard_log_scroll =
+                                    state.dashboard_log_scroll.saturating_sub(1);
+                            } else if state.tab == 1 && !state.history.is_empty() {
                                 if state.history_selected < state.history.len().saturating_sub(1) {
                                     state.history_selected += 1;
 
@@ -374,10 +385,17 @@ pub async fn run(args: Cli) -> Result<()> {
                             if state.tab == 1 && !state.history.is_empty() {
                                 let page_size = 20;
                                 state.history_selected = state.history_selected.saturating_sub(page_size);
+                            } else if state.tab == 0 {
+                                let max_scroll = state.text_log.len().saturating_sub(1);
+                                state.dashboard_log_scroll =
+                                    (state.dashboard_log_scroll + 10).min(max_scroll);
                             }
                         }
                         (_, KeyCode::PageDown) => {
-                            if state.tab == 1 && !state.history.is_empty() {
+                            if state.tab == 0 {
+                                state.dashboard_log_scroll =
+                                    state.dashboard_log_scroll.saturating_sub(10);
+                            } else if state.tab == 1 && !state.history.is_empty() {
                                 let page_size = 20;
                                 let max_idx = state.history.len().saturating_sub(1);
                                 state.history_selected = (state.history_selected + page_size).min(max_idx);
@@ -519,6 +537,19 @@ pub async fn run(args: Cli) -> Result<()> {
                                     let enriched = enrich_result_with_network_info(&r, &state);
                                     state.last_result = Some(enriched.clone());
 
+                                    // Emit the same end-of-run summary lines text mode prints into the
+                                    // dashboard's Test Activity panel so users see the final numbers.
+                                    for line in crate::event_format::format_result_summary(
+                                        &enriched,
+                                        &state.dl_points,
+                                        &state.ul_points,
+                                        &state.idle_latency_samples,
+                                        &state.loaded_dl_latency_samples,
+                                        &state.loaded_ul_latency_samples,
+                                    ) {
+                                        UiState::push_log_line(&mut state.text_log, line);
+                                    }
+
                                     // Handle command-line export flags
                                     let mut export_messages = Vec::new();
                                     if let Some(export_path) = args.export_json.as_deref() {
@@ -589,6 +620,25 @@ async fn start_run(args: &Cli) -> Result<RunCtx> {
 }
 
 fn apply_event(state: &mut UiState, ev: TestEvent) {
+    // Append the same lines text mode would print to the activity log.
+    let added = crate::event_format::format_event_lines(&ev);
+    if !added.is_empty() {
+        let added_count = added.len();
+        for line in added {
+            UiState::push_log_line(&mut state.text_log, line);
+        }
+        // If the user has scrolled away from the bottom, keep their view
+        // anchored on the same lines by pushing the offset out by the number
+        // of new lines. Scroll == 0 stays pinned to the newest (auto-follow).
+        if state.dashboard_log_scroll > 0 {
+            let max_scroll = state.text_log.len().saturating_sub(1);
+            state.dashboard_log_scroll = state
+                .dashboard_log_scroll
+                .saturating_add(added_count)
+                .min(max_scroll);
+        }
+    }
+
     match ev {
         TestEvent::PhaseStarted { phase } => {
             state.phase = phase;

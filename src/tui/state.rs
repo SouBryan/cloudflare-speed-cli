@@ -107,6 +107,11 @@ pub struct UiState {
     pub traceroute_hops: Vec<TracerouteHop>,
     /// None = check not completed, Some(None) = on latest, Some(Some(v)) = update available
     pub update_status: Option<Option<String>>,
+    /// Rolling log of text-mode lines for the dashboard's Test Activity panel.
+    pub text_log: Vec<String>,
+    /// How far back (in lines) the dashboard's Test Activity panel is scrolled
+    /// from the bottom. 0 = pinned to newest (auto-follow).
+    pub dashboard_log_scroll: usize,
 }
 
 impl Default for UiState {
@@ -196,6 +201,8 @@ impl Default for UiState {
             traceroute_max_hops: 30,
             traceroute_hops: Vec::new(),
             update_status: None,
+            text_log: Vec::new(),
+            dashboard_log_scroll: 0,
         }
     }
 }
@@ -279,6 +286,14 @@ impl UiState {
         points.push((x, y));
         if points.len() > MAX {
             let _ = points.drain(0..(points.len() - MAX));
+        }
+    }
+
+    pub fn push_log_line(log: &mut Vec<String>, line: String) {
+        const MAX: usize = 500;
+        log.push(line);
+        if log.len() > MAX {
+            let _ = log.drain(0..(log.len() - MAX));
         }
     }
 
