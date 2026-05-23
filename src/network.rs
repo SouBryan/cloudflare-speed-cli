@@ -3,6 +3,12 @@ use crate::model::RunResult;
 use serde_json::Value;
 use std::process::Command;
 
+/// Path to the legacy macOS airport CLI. Apple removed this binary in macOS 14.4 (Sonoma),
+/// so it is only useful as a fallback on macOS 13 and earlier.
+#[cfg(target_os = "macos")]
+const MACOS_AIRPORT_PATH: &str =
+    "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
+
 /// Extracted metadata fields from Cloudflare response
 #[derive(Debug, Clone, Default)]
 pub struct ExtractedMetadata {
@@ -112,7 +118,7 @@ fn gather_default_network_info() -> (Option<String>, Option<String>, Option<bool
 }
 
 /// Get the default network interface name
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+#[cfg(target_os = "linux")]
 fn get_default_interface() -> Option<String> {
     // Try to get interface from default route
     if let Ok(output) = Command::new("ip")
@@ -169,6 +175,24 @@ fn get_default_interface() -> Option<String> {
         }
     }
 
+    // Fallback: first non-loopback, non-tunnel interface from the system
+    if let Ok(interfaces) = if_addrs::get_if_addrs() {
+        for iface in interfaces {
+            if iface.is_loopback() {
+                continue;
+            }
+            // Skip common virtual/tunnel interfaces
+            if iface.name.starts_with("utun")
+                || iface.name.starts_with("awdl")
+                || iface.name.starts_with("llw")
+                || iface.name.starts_with("bridge")
+            {
+                continue;
+            }
+            return Some(iface.name);
+        }
+    }
+
     None
 }
 
@@ -211,7 +235,7 @@ fn get_default_interface() -> Option<String> {
 }
 
 /// Check if interface is wireless
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+#[cfg(target_os = "linux")]
 fn check_if_wireless(iface: &str) -> Option<bool> {
     // Check if /sys/class/net/<iface>/wireless exists
     let wireless_path = format!("/sys/class/net/{}/wireless", iface);
@@ -221,25 +245,29 @@ fn check_if_wireless(iface: &str) -> Option<bool> {
 #[cfg(target_os = "macos")]
 fn check_if_wireless(iface: &str) -> Option<bool> {
     // Parse `networksetup -listallhardwareports` to check if the interface is Wi-Fi
-    if let Ok(output) = Command::new("networksetup").arg("-listallhardwareports").output() {
-        if let Ok(output_str) = String::from_utf8(output.stdout) {
-            let mut is_wifi_section = false;
-            for line in output_str.lines() {
-                let line = line.trim();
-                if line.starts_with("Hardware Port:") {
-                    let port_name = line.splitn(2, ':').nth(1).unwrap_or("").trim().to_lowercase();
-                    is_wifi_section = port_name.contains("wi-fi") || port_name.contains("airport");
-                } else if line.starts_with("Device:") {
-                    if let Some(device) = line.splitn(2, ':').nth(1) {
-                        if device.trim() == iface {
-                            return Some(is_wifi_section);
-                        }
-                    }
+    let output = Command::new("networksetup")
+        .arg("-listallhardwareports")
+        .output()
+        .ok()?;
+    let output_str = String::from_utf8(output.stdout).ok()?;
+
+    let mut is_wifi_section = false;
+    for line in output_str.lines() {
+        let line = line.trim();
+        if line.starts_with("Hardware Port:") {
+            let port_name = line.splitn(2, ':').nth(1).unwrap_or("").trim().to_lowercase();
+            is_wifi_section = port_name.contains("wi-fi") || port_name.contains("airport");
+        } else if line.starts_with("Device:") {
+            if let Some(device) = line.splitn(2, ':').nth(1) {
+                if device.trim() == iface {
+                    return Some(is_wifi_section);
                 }
             }
         }
     }
-    Some(false)
+
+    // Interface wasn't listed (e.g. utun/VPN); we don't know, so return None
+    None
 }
 
 #[cfg(target_os = "windows")]
@@ -257,7 +285,7 @@ fn check_if_wireless(iface: &str) -> Option<bool> {
 }
 
 /// Get wireless SSID for an interface
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+#[cfg(target_os = "linux")]
 fn get_wireless_ssid(iface: &str) -> Option<String> {
     // Try iwgetid first (most reliable)
     if let Ok(output) = Command::new("iwgetid").arg("-r").arg(iface).output() {
@@ -304,9 +332,8 @@ fn get_wireless_ssid(iface: &str) -> Option<String> {
         }
     }
 
-    // Fallback: try the airport command (deprecated in newer macOS but widely available)
-    let airport = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
-    if let Ok(output) = Command::new(airport).arg("-I").output() {
+    // Fallback: try the legacy airport command (removed in macOS 14.4, but works on older versions)
+    if let Ok(output) = Command::new(MACOS_AIRPORT_PATH).arg("-I").output() {
         if let Ok(output_str) = String::from_utf8(output.stdout) {
             for line in output_str.lines() {
                 let line = line.trim();
@@ -356,7 +383,7 @@ fn get_wireless_ssid(iface: &str) -> Option<String> {
 }
 
 /// Get MAC address of interface
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+#[cfg(target_os = "linux")]
 fn get_interface_mac(iface: &str) -> Option<String> {
     let mac_path = format!("/sys/class/net/{}/address", iface);
     std::fs::read_to_string(mac_path)
