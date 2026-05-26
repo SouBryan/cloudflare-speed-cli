@@ -154,6 +154,34 @@ fn get_default_interface() -> Option<String> {
     None
 }
 
+#[cfg(target_os = "freebsd")]
+fn get_default_interface() -> Option<String> {
+    let output = Command::new("netstat")
+        .args(&["-rn", "--libxo=json"])
+        .output()
+        .ok()?;
+
+    let output_str = String::from_utf8(output.stdout).ok()?;
+    let _v: Value = serde_json::from_str(&output_str).ok()?;
+
+    if let Some(families) = _v["statistics"]["route-information"]["route-table"]["rt-family"].as_array() {
+        for family in families {
+            if let Some("Internet" | "Internet6") = family["address-family"].as_str() {
+                if let Some(entries) = family["rt-entry"].as_array() {
+                    for entry in entries {
+                        if entry["destination"].as_str() == Some("default") {
+                            let interface = entry["interface-name"].as_str();
+                            return Some(interface?.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(target_os = "macos")]
 fn get_default_interface() -> Option<String> {
     // Use `route -n get default` to find the default interface
@@ -242,6 +270,23 @@ fn check_if_wireless(iface: &str) -> Option<bool> {
     Some(std::path::Path::new(&wireless_path).exists())
 }
 
+#[cfg(target_os = "freebsd")]
+fn check_if_wireless(iface: &str) -> Option<bool> {
+    // An very quick and dirty wireless check for FreeBSD
+    // but it works
+    let output = Command::new("ifconfig")
+        .args(&["-g", "wlan"])
+        .output()
+        .ok()?;
+    let output_str = String::from_utf8(output.stdout).ok()?;
+
+    let is_wireless = output_str
+        .lines()
+        .any(|line| line.trim() == iface);
+
+    Some(is_wireless)
+}
+
 #[cfg(target_os = "macos")]
 fn check_if_wireless(iface: &str) -> Option<bool> {
     // Parse `networksetup -listallhardwareports` to check if the interface is Wi-Fi
@@ -307,6 +352,34 @@ fn get_wireless_ssid(iface: &str) -> Option<String> {
                         return Some(ssid.to_string());
                     }
                 }
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "freebsd")]
+fn get_wireless_ssid(iface: &str) -> Option<String> {
+    let output = Command::new("ifconfig")
+        .arg(iface)
+        .output()
+        .ok()?;
+
+    let output_str = String::from_utf8_lossy(&output.stdout);
+
+    for line in output_str.lines() {
+        if let Some(idx) = line.find("ssid ") {
+            let rest = line[idx + 5..].trim_start();
+
+            if rest.starts_with('"') {
+                // ssid "an example ssid" channel 1 ...
+                let end_idx = rest[1..].find('"')?;
+                return Some(rest[1..end_idx + 1].to_string());
+            } else {
+                // ssid an_example_ssid channel 1 ...
+                let end_idx = rest.find(' ').unwrap_or(rest.len());
+                return Some(rest[..end_idx].to_string());
             }
         }
     }
@@ -392,7 +465,8 @@ fn get_interface_mac(iface: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+// The same code works both for macOS and FreeBSD
 fn get_interface_mac(iface: &str) -> Option<String> {
     // Use `ifconfig <iface>` and parse the `ether` line
     if let Ok(output) = Command::new("ifconfig").arg(iface).output() {
