@@ -77,12 +77,19 @@ pub struct Cli {
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub auto_save: bool,
 
-    /// Bind to a specific network interface (e.g., ens18, eth0)
+    /// Bind all test traffic to a specific network interface (e.g. ens18, eth0).
+    /// On Linux/macOS this uses device binding (SO_BINDTODEVICE / IP_BOUND_IF),
+    /// so both IPv4 and IPv6 destinations stay reachable. On platforms without
+    /// device binding (Windows, the BSDs) it instead binds one of the
+    /// interface's source IPs — a single address family, preferring IPv6; pass
+    /// -4 / -6 to pick the family.
     #[arg(long)]
     pub interface: Option<String>,
 
-    /// Bind to a specific source IP address (e.g., 192.168.10.0)
-    #[arg(long)]
+    /// Bind all test traffic to a specific source IP address (e.g. 192.168.10.5).
+    /// Constrains the test to that address's family (IPv4 or IPv6). Mutually
+    /// exclusive with --interface.
+    #[arg(long, conflicts_with = "interface")]
     pub source: Option<String>,
 
     /// Route traffic through a proxy (HTTP, HTTPS, or SOCKS5)
@@ -189,24 +196,46 @@ pub fn build_config(args: &Cli) -> Result<RunConfig> {
     // DNS and TLS run by default unless --skip-diagnostics is set
     let skip = args.skip_diagnostics;
 
-    // Resolve bind address once from --interface or --source
-    let resolved_bind_ip = network_bind::resolve_bind_address(
-        args.interface.as_ref(),
-        args.source.as_ref(),
-    )?
-    .map(|addr| addr.ip());
+    // The requested IP-version restriction (from --ipv4-only / --ipv6-only),
+    // validated up front. `None` = unrestricted.
+    let family = network_bind::resolve_ip_family(args.ipv4_only, args.ipv6_only, None)?;
 
-    if let Some(ip) = resolved_bind_ip {
-        if let Some(ref iface) = args.interface {
-            eprintln!("Binding HTTP connections to interface {} (IP: {})", iface, ip);
-        } else {
-            eprintln!("Binding HTTP connections to source IP: {}", ip);
+    // Bind resolution (--source and --interface are mutually exclusive at the
+    // CLI). --source pins a specific local IP. --interface uses device binding
+    // (SO_BINDTODEVICE / IP_BOUND_IF) where available, which keeps the run
+    // dual-stack with no pinned IP; on platforms without it we instead pin the
+    // interface's own source IP for the requested family (preferring IPv6 when
+    // unrestricted). Either way the result is a single `resolved_bind_ip` (or
+    // None for device binding) consumed by the existing source-IP/family
+    // machinery. The user-facing notice is emitted by the caller (see
+    // `bind_notice`), NOT here: build_config runs inside the TUI's alternate
+    // screen, where stray stderr writes corrupt the display.
+    let resolved_bind_ip = if let Some(src) = args.source.as_deref() {
+        Some(src.parse().context("Invalid source IP address format")?)
+    } else if let Some(iface) = args.interface.as_deref() {
+        if !network_bind::interface_exists(iface) {
+            return Err(anyhow::anyhow!(
+                "Interface '{}' not found or has no addresses",
+                iface
+            ));
         }
-    }
+        if network_bind::device_binding_supported() {
+            None
+        } else {
+            Some(network_bind::interface_source_ip(iface, family).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Interface '{}' has no usable {} address",
+                    iface,
+                    family.map(|f| f.label()).unwrap_or("IP")
+                )
+            })?)
+        }
+    } else {
+        None
+    };
 
-    // Validate the IP-version selection up front so contradictions (both
-    // --ipv4-only and --ipv6-only, or a flag that disagrees with the bound
-    // source IP's family) fail before the test starts rather than mid-run.
+    // Re-validate now that --source's family is known (a v4 source with
+    // --ipv6-only, etc.). For --interface we already selected a matching family.
     network_bind::resolve_ip_family(args.ipv4_only, args.ipv6_only, resolved_bind_ip)?;
 
     Ok(RunConfig {
@@ -240,10 +269,36 @@ pub fn build_config(args: &Cli) -> Result<RunConfig> {
     })
 }
 
+/// One-line summary of the active interface/source binding, or `None` when
+/// neither was given. Emitted on stderr in text/json modes (the TUI shows the
+/// interface in its Network Information panel instead).
+pub fn bind_notice(cfg: &RunConfig) -> Option<String> {
+    // --source and --interface are mutually exclusive, so at most one applies.
+    match (cfg.interface.as_deref(), cfg.resolved_bind_ip) {
+        // Device binding: no pinned IP, the OS sources per family.
+        (Some(iface), None) => Some(format!(
+            "Binding sockets to interface {} (device binding; dual-stack preserved)",
+            iface
+        )),
+        // No device binding: the interface was resolved to a single source IP.
+        (Some(iface), Some(ip)) => Some(format!(
+            "Binding sockets to interface {} via source IP {} (single address family)",
+            iface, ip
+        )),
+        (None, Some(ip)) => Some(format!("Binding sockets to source IP {}", ip)),
+        (None, None) => None,
+    }
+}
+
 /// Common function to run the test engine and process results.
 /// `silent` controls whether JSON is printed and whether save errors propagate.
 async fn run_test_engine(args: Cli, silent: bool) -> Result<()> {
     let cfg = build_config(&args)?;
+    if !silent {
+        if let Some(msg) = bind_notice(&cfg) {
+            eprintln!("{}", msg);
+        }
+    }
     let network_info = crate::network::gather_network_info(&args);
 
     let (evt_tx, mut evt_rx) = mpsc::channel::<TestEvent>(2048);
@@ -308,6 +363,9 @@ async fn run_test_engine(args: Cli, silent: bool) -> Result<()> {
 
 async fn run_text(args: Cli) -> Result<()> {
     let cfg = build_config(&args)?;
+    if let Some(msg) = bind_notice(&cfg) {
+        eprintln!("{}", msg);
+    }
     let (evt_tx, mut evt_rx) = mpsc::channel::<TestEvent>(2048);
     let (_, ctrl_rx) = mpsc::channel::<EngineControl>(16);
 

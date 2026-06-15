@@ -40,6 +40,7 @@ pub async fn measure_tls_handshake(
     hostname: &str,
     port: u16,
     cert_path: Option<&std::path::Path>,
+    interface: Option<&str>,
     bind_ip: Option<IpAddr>,
     family: Option<IpFamily>,
 ) -> Result<TlsSummary> {
@@ -71,7 +72,7 @@ pub async fn measure_tls_handshake(
     let connector = TlsConnector::from(Arc::new(config));
 
     // Resolve and connect, trying each address until one succeeds.
-    let tcp_stream = connect_tcp(hostname, port, bind_ip, family).await?;
+    let tcp_stream = connect_tcp(hostname, port, interface, bind_ip, family).await?;
 
     // Parse server name for TLS
     let server_name: ServerName<'static> = hostname
@@ -110,6 +111,7 @@ pub async fn measure_tls_handshake(
 async fn connect_tcp(
     hostname: &str,
     port: u16,
+    interface: Option<&str>,
     bind_ip: Option<IpAddr>,
     family: Option<IpFamily>,
 ) -> Result<tokio::net::TcpStream> {
@@ -155,6 +157,18 @@ async fn connect_tcp(
         if let Some(ip) = bind_ip {
             if let Err(e) = socket.bind(SocketAddr::new(ip, 0)) {
                 last_err = Some(anyhow!(e).context(format!("failed to bind to {}", ip)));
+                continue;
+            }
+        }
+
+        // Device-bind to the interface where supported (the OS then picks a
+        // source per family); elsewhere the interface was already resolved to
+        // `bind_ip` above, so this is a no-op.
+        if let Some(iface) = interface {
+            if let Err(e) = super::network_bind::bind_socket_to_device(&socket, iface, addr.is_ipv6())
+            {
+                last_err =
+                    Some(anyhow!(e).context(format!("failed to bind to interface {}", iface)));
                 continue;
             }
         }

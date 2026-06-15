@@ -39,7 +39,7 @@ impl CloudflareClient {
             .connect_timeout(crate::constants::HTTP_CONNECT_TIMEOUT)
             .tcp_keepalive(Duration::from_secs(15));
 
-        builder = network_bind::apply_local_address(builder, cfg.resolved_bind_ip);
+        builder = network_bind::apply_bind(builder, cfg.interface.as_deref(), cfg.resolved_bind_ip);
 
         // Pin DNS resolution to the requested family for --ipv4-only /
         // --ipv6-only. A proxy resolves the target itself, so the override
