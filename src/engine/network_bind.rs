@@ -141,11 +141,23 @@ pub fn interface_source_ip(interface: &str, family: Option<IpFamily>) -> Option<
             }
         }
     }
-    let v6 = global_v6.or(link_local_v6);
+    select_source_ip(family, v4, global_v6, link_local_v6)
+}
+
+/// Preference order for `interface_source_ip`, split out so it can be unit-tested
+/// without a real interface. With no family restriction we prefer a routable
+/// global IPv6, then IPv4; a link-local IPv6 is only ever a last resort, since a
+/// bare `fe80::` source (no scope id) can't reach a global destination.
+fn select_source_ip(
+    family: Option<IpFamily>,
+    v4: Option<IpAddr>,
+    global_v6: Option<IpAddr>,
+    link_local_v6: Option<IpAddr>,
+) -> Option<IpAddr> {
     match family {
         Some(IpFamily::V4) => v4,
-        Some(IpFamily::V6) => v6,
-        None => v6.or(v4),
+        Some(IpFamily::V6) => global_v6.or(link_local_v6),
+        None => global_v6.or(v4).or(link_local_v6),
     }
 }
 
@@ -332,6 +344,39 @@ mod tests {
     #[test]
     fn test_interface_source_ip_nonexistent() {
         assert!(interface_source_ip("nonexistent_iface_xyz", None).is_none());
+    }
+
+    #[test]
+    fn test_select_source_ip_prefers_routable_over_link_local() {
+        let v4: IpAddr = "192.168.1.50".parse().unwrap();
+        let global_v6: IpAddr = "2001:db8::1".parse().unwrap();
+        let link_local: IpAddr = "fe80::1".parse().unwrap();
+
+        // Unrestricted: a routable global IPv6 wins when present.
+        assert_eq!(
+            select_source_ip(None, Some(v4), Some(global_v6), Some(link_local)),
+            Some(global_v6)
+        );
+        // Unrestricted with only a link-local IPv6: a usable IPv4 must win over
+        // the unroutable fe80 source (the regression this guards against).
+        assert_eq!(
+            select_source_ip(None, Some(v4), None, Some(link_local)),
+            Some(v4)
+        );
+        // Link-local is chosen only when nothing routable exists.
+        assert_eq!(
+            select_source_ip(None, None, None, Some(link_local)),
+            Some(link_local)
+        );
+        // Explicit families honor the request.
+        assert_eq!(
+            select_source_ip(Some(IpFamily::V4), Some(v4), Some(global_v6), None),
+            Some(v4)
+        );
+        assert_eq!(
+            select_source_ip(Some(IpFamily::V6), Some(v4), Some(global_v6), Some(link_local)),
+            Some(global_v6)
+        );
     }
 
     #[test]
