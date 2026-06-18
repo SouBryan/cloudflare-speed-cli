@@ -292,8 +292,10 @@ async fn bind_and_connect_udp(
     candidates: &[SocketAddr],
     cfg: &RunConfig,
 ) -> Result<(UdpSocket, SocketAddr)> {
-    let bind_addr =
-        network_bind::resolve_bind_address(cfg.interface.as_ref(), cfg.source_ip.as_ref())?;
+    // Source IP comes from --source (or the interface-IP fallback on platforms
+    // without device binding); --interface itself is applied as a device bind in
+    // build_udp_socket so dual-stack candidate selection still works.
+    let bind_addr = cfg.resolved_bind_ip.map(|ip| SocketAddr::new(ip, 0));
 
     let mut last_err: Option<anyhow::Error> = None;
     for &addr in candidates {
@@ -314,60 +316,36 @@ async fn bind_and_connect_udp(
     Err(last_err.unwrap_or_else(|| anyhow!("no UDP candidates to try")))
 }
 
-/// Build a single UDP socket: bind to source IP if set, fall back to an
-/// ephemeral wildcard bind matching the target family otherwise. On Linux,
-/// also apply `SO_BINDTODEVICE` when an interface name is provided so the
-/// kernel can't reroute the packets out a different NIC.
+/// Build a single UDP socket: bind to `bind_addr` (the source IP, or the
+/// interface's resolved IP on platforms without device binding) when set,
+/// otherwise an ephemeral wildcard bind matching the target family. When an
+/// interface name is given on a device-binding platform, pin the socket to that
+/// device so the kernel can't reroute the packets out a different NIC.
 fn build_udp_socket(
     target: SocketAddr,
     bind_addr: Option<SocketAddr>,
     interface: Option<&str>,
 ) -> Result<UdpSocket> {
-    if let Some(addr) = bind_addr {
+    let is_ipv6 = bind_addr.map(|a| a.is_ipv6()).unwrap_or(target.is_ipv6());
+
+    let std_socket: std::net::UdpSocket = if let Some(addr) = bind_addr {
         let domain = socket2::Domain::for_address(addr);
         let socket =
             socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
         socket.bind(&socket2::SockAddr::from(addr))?;
-
-        #[cfg(target_os = "linux")]
-        if let Some(iface) = interface {
-            use std::ffi::CString;
-            use std::os::unix::io::AsRawFd;
-
-            let ifname = CString::new(iface).map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid interface name")
-            })?;
-            unsafe {
-                if libc::setsockopt(
-                    socket.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_BINDTODEVICE,
-                    ifname.as_ptr() as *const libc::c_void,
-                    ifname.as_bytes().len() as libc::socklen_t,
-                ) != 0
-                {
-                    return Err(anyhow!(
-                        "Failed to bind to interface {}: {}",
-                        iface,
-                        std::io::Error::last_os_error()
-                    ));
-                }
-            }
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        let _ = interface;
-
-        let std_socket: std::net::UdpSocket = socket.into();
-        std_socket.set_nonblocking(true)?;
-        Ok(UdpSocket::from_std(std_socket)?)
+        socket.into()
     } else {
         let any = if target.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
-        Ok(std::net::UdpSocket::bind(any)
-            .and_then(|s| {
-                s.set_nonblocking(true)?;
-                Ok(s)
-            })
-            .map(UdpSocket::from_std)??)
+        std::net::UdpSocket::bind(any)?
+    };
+
+    // Device binding where supported; a no-op otherwise (the interface was
+    // already resolved to `bind_addr`).
+    if let Some(iface) = interface {
+        network_bind::bind_socket_to_device(&std_socket, iface, is_ipv6)
+            .map_err(|e| anyhow!("Failed to bind to interface {}: {}", iface, e))?;
     }
+
+    std_socket.set_nonblocking(true)?;
+    Ok(UdpSocket::from_std(std_socket)?)
 }

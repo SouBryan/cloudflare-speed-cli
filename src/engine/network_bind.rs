@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use reqwest::ClientBuilder;
+use std::io;
 use std::net::{IpAddr, SocketAddr};
 
 /// Outbound IP protocol-version restriction for a run.
@@ -94,54 +95,6 @@ pub async fn resolve_addrs_for_family(
     Ok(addrs)
 }
 
-/// Get the IP address of a network interface using the `if-addrs` crate
-pub fn get_interface_ip(interface: &str) -> Result<IpAddr> {
-    use if_addrs::get_if_addrs;
-
-    let addrs = get_if_addrs().context("Failed to enumerate network interfaces")?;
-
-    // Prefer IPv4 addresses
-    for addr in &addrs {
-        if addr.name == interface {
-            if let if_addrs::IfAddr::V4(v4) = &addr.addr {
-                return Ok(IpAddr::V4(v4.ip));
-            }
-        }
-    }
-
-    // Fallback to IPv6 if no IPv4 found
-    for addr in &addrs {
-        if addr.name == interface {
-            if let if_addrs::IfAddr::V6(v6) = &addr.addr {
-                return Ok(IpAddr::V6(v6.ip));
-            }
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "Interface {} not found or has no IP address assigned",
-        interface
-    ))
-}
-
-/// Resolve binding address from interface name or source IP
-pub fn resolve_bind_address(
-    interface: Option<&String>,
-    source_ip: Option<&String>,
-) -> Result<Option<SocketAddr>> {
-    if let Some(ip_str) = source_ip {
-        let ip: IpAddr = ip_str.parse().context("Invalid source IP address format")?;
-        return Ok(Some(SocketAddr::new(ip, 0)));
-    }
-
-    if let Some(iface) = interface {
-        let ip = get_interface_ip(iface)
-            .with_context(|| format!("Failed to get IP for interface {}", iface))?;
-        return Ok(Some(SocketAddr::new(ip, 0)));
-    }
-
-    Ok(None)
-}
 
 /// Apply local address binding to a reqwest client builder.
 /// If `bind_ip` is Some, binds the client to that local address.
@@ -150,6 +103,166 @@ pub fn apply_local_address(builder: ClientBuilder, bind_ip: Option<IpAddr>) -> C
         Some(ip) => builder.local_address(ip),
         None => builder,
     }
+}
+
+/// Whether this platform can bind a socket to an interface *by name* — Linux via
+/// `SO_BINDTODEVICE`, macOS via `IP_BOUND_IF`/`IPV6_BOUND_IF`. On these the OS
+/// selects a source address per family, so `--interface` stays dual-stack.
+/// Everywhere else (Windows, the BSDs) we fall back to binding the interface's
+/// own IP (a single address family).
+pub const fn device_binding_supported() -> bool {
+    cfg!(any(target_os = "linux", target_os = "macos"))
+}
+
+/// The source address to bind for `--interface` on platforms without device
+/// binding, where pinning traffic to an interface means binding one of its
+/// addresses. `family` honors `--ipv4-only`/`--ipv6-only`; with no restriction
+/// it prefers a routable IPv6 (the system's usual preference and faster path),
+/// then IPv4. A link-local IPv6 is only ever a last resort. `None` if the
+/// interface has no address of the required family.
+pub fn interface_source_ip(interface: &str, family: Option<IpFamily>) -> Option<IpAddr> {
+    let addrs = if_addrs::get_if_addrs().ok()?;
+    let mut v4: Option<IpAddr> = None;
+    let mut global_v6: Option<IpAddr> = None;
+    let mut link_local_v6: Option<IpAddr> = None;
+    for a in &addrs {
+        if a.name != interface {
+            continue;
+        }
+        match &a.addr {
+            if_addrs::IfAddr::V4(v4a) => {
+                v4.get_or_insert(IpAddr::V4(v4a.ip));
+            }
+            if_addrs::IfAddr::V6(v6) if crate::network::is_link_local_v6(&v6.ip) => {
+                link_local_v6.get_or_insert(IpAddr::V6(v6.ip));
+            }
+            if_addrs::IfAddr::V6(v6) => {
+                global_v6.get_or_insert(IpAddr::V6(v6.ip));
+            }
+        }
+    }
+    select_source_ip(family, v4, global_v6, link_local_v6)
+}
+
+/// Preference order for `interface_source_ip`, split out so it can be unit-tested
+/// without a real interface. With no family restriction we prefer a routable
+/// global IPv6, then IPv4; a link-local IPv6 is only ever a last resort, since a
+/// bare `fe80::` source (no scope id) can't reach a global destination.
+fn select_source_ip(
+    family: Option<IpFamily>,
+    v4: Option<IpAddr>,
+    global_v6: Option<IpAddr>,
+    link_local_v6: Option<IpAddr>,
+) -> Option<IpAddr> {
+    match family {
+        Some(IpFamily::V4) => v4,
+        Some(IpFamily::V6) => global_v6.or(link_local_v6),
+        None => global_v6.or(v4).or(link_local_v6),
+    }
+}
+
+/// Whether a network interface with the given name currently exists.
+pub fn interface_exists(name: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if std::path::Path::new(&format!("/sys/class/net/{}", name)).exists() {
+            return true;
+        }
+    }
+    if_addrs::get_if_addrs()
+        .map(|addrs| addrs.iter().any(|a| a.name == name))
+        .unwrap_or(false)
+}
+
+/// Apply `--interface` / `--source` binding to a reqwest client builder.
+///
+/// On device-binding platforms `interface` uses `.interface()`, so the OS picks
+/// a source address per family and the run stays dual-stack. `bind_ip` (from
+/// `--source`, or the interface's resolved IP on platforms without device
+/// binding) pins the local address to a single family. The two are mutually
+/// exclusive at the CLI, so at most one applies.
+pub fn apply_bind(
+    builder: ClientBuilder,
+    interface: Option<&str>,
+    bind_ip: Option<IpAddr>,
+) -> ClientBuilder {
+    let builder = apply_local_address(builder, bind_ip);
+
+    // `.interface()` exists only on the device-binding platforms; elsewhere the
+    // interface was already resolved to `bind_ip` above.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(iface) = interface {
+        return builder.interface(iface);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = interface;
+
+    builder
+}
+
+/// Bind an already-created socket to a network interface by name: Linux uses
+/// `SO_BINDTODEVICE`, macOS uses `IP_BOUND_IF`/`IPV6_BOUND_IF` (chosen by
+/// `is_ipv6`). A no-op on every other platform (where the caller instead binds
+/// the interface's source IP), so it can be called unconditionally.
+#[cfg(target_os = "linux")]
+pub fn bind_socket_to_device<S: std::os::unix::io::AsRawFd>(
+    sock: &S,
+    interface: &str,
+    _is_ipv6: bool,
+) -> io::Result<()> {
+    let cname = std::ffi::CString::new(interface)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid interface name"))?;
+    let ret = unsafe {
+        libc::setsockopt(
+            sock.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_BINDTODEVICE,
+            cname.as_ptr() as *const libc::c_void,
+            cname.as_bytes().len() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn bind_socket_to_device<S: std::os::unix::io::AsRawFd>(
+    sock: &S,
+    interface: &str,
+    is_ipv6: bool,
+) -> io::Result<()> {
+    let cname = std::ffi::CString::new(interface)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid interface name"))?;
+    let idx = unsafe { libc::if_nametoindex(cname.as_ptr()) };
+    if idx == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let (level, optname) = if is_ipv6 {
+        (libc::IPPROTO_IPV6, libc::IPV6_BOUND_IF)
+    } else {
+        (libc::IPPROTO_IP, libc::IP_BOUND_IF)
+    };
+    let idx = idx as libc::c_int;
+    let ret = unsafe {
+        libc::setsockopt(
+            sock.as_raw_fd(),
+            level,
+            optname,
+            &idx as *const libc::c_int as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn bind_socket_to_device<S>(_sock: &S, _interface: &str, _is_ipv6: bool) -> io::Result<()> {
+    Ok(())
 }
 
 /// Reverse-lookup: find the interface name that owns a given IP address.
@@ -182,6 +295,16 @@ mod tests {
     const LOOPBACK_IFACE: &str = "lo0";
 
     #[test]
+    fn test_interface_exists_loopback() {
+        assert!(interface_exists(LOOPBACK_IFACE));
+    }
+
+    #[test]
+    fn test_interface_exists_nonexistent() {
+        assert!(!interface_exists("nonexistent_iface_xyz"));
+    }
+
+    #[test]
     fn test_get_interface_for_ip_loopback() {
         // 127.0.0.1 is bound to the loopback interface ("lo" on Linux, "lo0" on macOS/BSD)
         let iface = get_interface_for_ip("127.0.0.1");
@@ -202,62 +325,58 @@ mod tests {
     }
 
     #[test]
-    fn test_get_interface_ip_loopback() {
-        let ip = get_interface_ip(LOOPBACK_IFACE).unwrap();
-        assert_eq!(ip, "127.0.0.1".parse::<IpAddr>().unwrap());
+    fn test_interface_source_ip_loopback() {
+        // Loopback has both 127.0.0.1 and ::1; ::1 is routable (not link-local).
+        // Unrestricted prefers IPv6; --ipv4-only/--ipv6-only honor the family.
+        let v4: IpAddr = "127.0.0.1".parse().unwrap();
+        let v6: IpAddr = "::1".parse().unwrap();
+        assert_eq!(interface_source_ip(LOOPBACK_IFACE, None), Some(v6));
+        assert_eq!(
+            interface_source_ip(LOOPBACK_IFACE, Some(IpFamily::V6)),
+            Some(v6)
+        );
+        assert_eq!(
+            interface_source_ip(LOOPBACK_IFACE, Some(IpFamily::V4)),
+            Some(v4)
+        );
     }
 
     #[test]
-    fn test_get_interface_ip_nonexistent() {
-        let result = get_interface_ip("nonexistent_iface_xyz");
-        assert!(result.is_err());
+    fn test_interface_source_ip_nonexistent() {
+        assert!(interface_source_ip("nonexistent_iface_xyz", None).is_none());
     }
 
     #[test]
-    fn test_roundtrip_interface_to_ip_and_back() {
-        // Get the IP for loopback, then reverse-lookup should return the loopback name
-        let ip = get_interface_ip(LOOPBACK_IFACE).unwrap();
-        let iface = get_interface_for_ip(&ip.to_string());
-        assert_eq!(iface, Some(LOOPBACK_IFACE.to_string()));
-    }
+    fn test_select_source_ip_prefers_routable_over_link_local() {
+        let v4: IpAddr = "192.168.1.50".parse().unwrap();
+        let global_v6: IpAddr = "2001:db8::1".parse().unwrap();
+        let link_local: IpAddr = "fe80::1".parse().unwrap();
 
-    #[test]
-    fn test_resolve_bind_address_none() {
-        let result = resolve_bind_address(None, None).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_resolve_bind_address_source_ip() {
-        let source = "127.0.0.1".to_string();
-        let result = resolve_bind_address(None, Some(&source)).unwrap();
-        let addr = result.unwrap();
-        assert_eq!(addr.ip(), "127.0.0.1".parse::<IpAddr>().unwrap());
-    }
-
-    #[test]
-    fn test_resolve_bind_address_invalid_source() {
-        let source = "not-an-ip".to_string();
-        let result = resolve_bind_address(None, Some(&source));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_resolve_bind_address_interface() {
-        let iface = LOOPBACK_IFACE.to_string();
-        let result = resolve_bind_address(Some(&iface), None).unwrap();
-        let addr = result.unwrap();
-        assert_eq!(addr.ip(), "127.0.0.1".parse::<IpAddr>().unwrap());
-    }
-
-    #[test]
-    fn test_resolve_bind_address_source_takes_priority() {
-        // When both are provided, source_ip wins
-        let iface = LOOPBACK_IFACE.to_string();
-        let source = "192.168.1.1".to_string();
-        let result = resolve_bind_address(Some(&iface), Some(&source)).unwrap();
-        let addr = result.unwrap();
-        assert_eq!(addr.ip(), "192.168.1.1".parse::<IpAddr>().unwrap());
+        // Unrestricted: a routable global IPv6 wins when present.
+        assert_eq!(
+            select_source_ip(None, Some(v4), Some(global_v6), Some(link_local)),
+            Some(global_v6)
+        );
+        // Unrestricted with only a link-local IPv6: a usable IPv4 must win over
+        // the unroutable fe80 source (the regression this guards against).
+        assert_eq!(
+            select_source_ip(None, Some(v4), None, Some(link_local)),
+            Some(v4)
+        );
+        // Link-local is chosen only when nothing routable exists.
+        assert_eq!(
+            select_source_ip(None, None, None, Some(link_local)),
+            Some(link_local)
+        );
+        // Explicit families honor the request.
+        assert_eq!(
+            select_source_ip(Some(IpFamily::V4), Some(v4), Some(global_v6), None),
+            Some(v4)
+        );
+        assert_eq!(
+            select_source_ip(Some(IpFamily::V6), Some(v4), Some(global_v6), Some(link_local)),
+            Some(global_v6)
+        );
     }
 
     #[test]
