@@ -122,36 +122,15 @@ async fn run_icmp_traceroute(
             .with_context(|| format!("Failed to bind raw ICMP socket to {}", v4))?;
     }
 
-    // On Linux, also pin the socket to the named interface so the kernel
-    // can't reroute the probes via another NIC even if the routing table says so.
-    #[cfg(target_os = "linux")]
+    // Device-bind to the named interface where supported so the kernel can't
+    // reroute the probes via another NIC. The raw socket is IPv4-only here, hence
+    // is_ipv6 = false. On platforms without device binding this is a no-op; the
+    // interface's IPv4 source was already bound via `bind_ip` above.
     if let Some(iface) = interface {
-        use std::ffi::CString;
-        use std::os::unix::io::AsRawFd;
-
-        let ifname = CString::new(iface).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid interface name")
+        super::network_bind::bind_socket_to_device(&socket, iface, false).map_err(|e| {
+            anyhow::anyhow!("Failed to bind raw ICMP socket to interface {}: {}", iface, e)
         })?;
-        unsafe {
-            if libc::setsockopt(
-                socket.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_BINDTODEVICE,
-                ifname.as_ptr() as *const libc::c_void,
-                ifname.as_bytes().len() as libc::socklen_t,
-            ) != 0
-            {
-                return Err(anyhow::anyhow!(
-                    "Failed to bind raw ICMP socket to interface {}: {}",
-                    iface,
-                    std::io::Error::last_os_error()
-                ));
-            }
-        }
     }
-
-    #[cfg(not(target_os = "linux"))]
-    let _ = interface;
 
     socket.set_read_timeout(Some(PROBE_TIMEOUT))?;
     socket.set_nonblocking(false)?;

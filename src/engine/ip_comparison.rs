@@ -20,6 +20,7 @@ const TEST_DURATION: Duration = Duration::from_secs(3);
 pub async fn compare_ip_versions(
     base_url: &str,
     user_agent: &str,
+    interface: Option<&str>,
     bind_ip: Option<IpAddr>,
     cert_path: Option<&std::path::Path>,
     family: Option<IpFamily>,
@@ -58,7 +59,7 @@ pub async fn compare_ip_versions(
     let ipv4_result = Some(if !test_v4 {
         skipped_result(family)
     } else if let Some(ip) = ipv4_addr {
-        test_ip_version(base_url, hostname, port, ip, user_agent, bind_ip, cert_path).await
+        test_ip_version(base_url, hostname, port, ip, user_agent, interface, bind_ip, cert_path).await
     } else {
         unavailable_result("No IPv4 address resolved")
     });
@@ -67,7 +68,7 @@ pub async fn compare_ip_versions(
     let ipv6_result = Some(if !test_v6 {
         skipped_result(family)
     } else if let Some(ip) = ipv6_addr {
-        test_ip_version(base_url, hostname, port, ip, user_agent, bind_ip, cert_path).await
+        test_ip_version(base_url, hostname, port, ip, user_agent, interface, bind_ip, cert_path).await
     } else {
         unavailable_result("No IPv6 address resolved")
     });
@@ -99,12 +100,14 @@ fn skipped_result(family: Option<IpFamily>) -> IpVersionResult {
 }
 
 /// Test a specific IP version by forcing requests to that IP.
+#[allow(clippy::too_many_arguments)]
 async fn test_ip_version(
     base_url: &str,
     hostname: &str,
     port: u16,
     ip: IpAddr,
     user_agent: &str,
+    interface: Option<&str>,
     bind_ip: Option<IpAddr>,
     cert_path: Option<&std::path::Path>,
 ) -> IpVersionResult {
@@ -132,7 +135,7 @@ async fn test_ip_version(
             }
         }
     }
-    let client = match network_bind::apply_local_address(builder, bind_ip).build() {
+    let client = match network_bind::apply_bind(builder, interface, bind_ip).build() {
         Ok(c) => c,
         Err(e) => {
             return IpVersionResult {

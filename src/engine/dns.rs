@@ -227,6 +227,7 @@ pub fn extract_hostname(url: &str) -> Option<String> {
 /// issued and left to time out.
 pub async fn fetch_external_ips(
     base_url: &str,
+    interface: Option<&str>,
     bind_ip: Option<std::net::IpAddr>,
     cert_path: Option<&std::path::Path>,
     family: Option<super::network_bind::IpFamily>,
@@ -247,14 +248,14 @@ pub async fn fetch_external_ips(
     let (ipv4, ipv6) = tokio::join!(
         async {
             if want_v4 {
-                fetch_external_ip_version(&url, &hostname, IpVersion::V4, bind_ip, cert_path).await
+                fetch_external_ip_version(&url, &hostname, IpVersion::V4, interface, bind_ip, cert_path).await
             } else {
                 None
             }
         },
         async {
             if want_v6 {
-                fetch_external_ip_version(&url, &hostname, IpVersion::V6, bind_ip, cert_path).await
+                fetch_external_ip_version(&url, &hostname, IpVersion::V6, interface, bind_ip, cert_path).await
             } else {
                 None
             }
@@ -274,6 +275,7 @@ async fn fetch_external_ip_version(
     url: &str,
     hostname: &str,
     version: IpVersion,
+    interface: Option<&str>,
     bind_ip: Option<std::net::IpAddr>,
     cert_path: Option<&std::path::Path>,
 ) -> Option<String> {
@@ -301,7 +303,7 @@ async fn fetch_external_ip_version(
     if let Some(path) = cert_path {
         builder = builder.add_root_certificate(super::cert::load_reqwest_certificate(path).ok()?);
     }
-    let client = network_bind::apply_local_address(builder, bind_ip)
+    let client = network_bind::apply_bind(builder, interface, bind_ip)
         .build()
         .ok()?;
 

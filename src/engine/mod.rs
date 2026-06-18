@@ -197,6 +197,7 @@ impl TestEngine {
                     &hostname,
                     port,
                     self.cfg.certificate_path.as_deref(),
+                    self.cfg.interface.as_deref(),
                     self.cfg.resolved_bind_ip,
                     family,
                 )
@@ -227,6 +228,7 @@ impl TestEngine {
         if self.cfg.measure_dns {
             let (v4, v6) = dns::fetch_external_ips(
                 &self.cfg.base_url,
+                self.cfg.interface.as_deref(),
                 self.cfg.resolved_bind_ip,
                 self.cfg.certificate_path.as_deref(),
                 family,
@@ -252,6 +254,7 @@ impl TestEngine {
             match ip_comparison::compare_ip_versions(
                 &self.cfg.base_url,
                 &self.cfg.user_agent,
+                self.cfg.interface.as_deref(),
                 self.cfg.resolved_bind_ip,
                 self.cfg.certificate_path.as_deref(),
                 family,

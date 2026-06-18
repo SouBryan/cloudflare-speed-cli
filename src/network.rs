@@ -640,7 +640,7 @@ fn get_interface_ips(interface_name: Option<&str>) -> (Option<String>, Option<St
 }
 
 /// Check if an IPv6 address is link-local (fe80::/10)
-fn is_link_local_v6(ip: &std::net::Ipv6Addr) -> bool {
+pub fn is_link_local_v6(ip: &std::net::Ipv6Addr) -> bool {
     let segments = ip.segments();
     (segments[0] & 0xffc0) == 0xfe80
 }
