@@ -113,21 +113,24 @@ fn init_clipboard_manager() -> Result<&'static std_mpsc::Sender<String>> {
 
         // Spawn a dedicated thread to manage clipboard operations
         std::thread::spawn(move || {
+            #[cfg(not(target_os = "android"))]
             use arboard::Clipboard;
 
+            #[cfg(not(target_os = "android"))]
             for text in rx {
-                // Create a new clipboard instance for each operation
                 if let Ok(mut clipboard) = Clipboard::new() {
-                    // Set the text
                     if clipboard.set_text(&text).is_ok() {
-                        // Keep the clipboard instance alive for 2 seconds
-                        // This gives clipboard managers plenty of time to read the contents
                         std::thread::sleep(Duration::from_secs(2));
                     }
-                    // Clipboard is dropped here
                 }
             }
-        });
+
+            #[cfg(target_os = "android")]
+            for _ in rx {
+                // Clipboard not supported on Android.
+             }
+        }
+        );
 
         tx
     });
@@ -142,9 +145,20 @@ fn init_clipboard_manager() -> Result<&'static std_mpsc::Sender<String>> {
 /// to ensure clipboard managers have time to read the contents on Linux.
 /// Returns immediately after queuing the clipboard operation, without blocking the main thread.
 pub fn copy_to_clipboard(text: &str) -> Result<()> {
-    let sender = init_clipboard_manager()?;
-    sender
-        .send(text.to_string())
-        .map_err(|_| anyhow::anyhow!("Clipboard manager channel closed"))?;
-    Ok(())
+    #[cfg(target_os = "android")]
+    {
+        let _ = text;
+        return Err(anyhow::anyhow!(
+            "Clipboard is not supported on Android"
+        ));
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let sender = init_clipboard_manager()?;
+        sender
+            .send(text.to_string())
+            .map_err(|_| anyhow::anyhow!("Clipboard manager channel closed"))?;
+        Ok(())
+    }
 }
