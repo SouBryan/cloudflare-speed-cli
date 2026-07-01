@@ -34,7 +34,6 @@ rand = "0.8.5"
 ratatui = { version = "0.30", optional = true, default-features = false, features = ["crossterm"] }
 reqwest = { version = "0.12.9", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "http2", "gzip", "brotli", "deflate", "json", "stream", "socks"] }
 libc = "0.2"
-
 ratatui-textarea = { version = "0.9", optional = true, features = ["search"] }
 serde = { version = "1.0.216", features = ["derive"] }
 serde_json = "1.0.133"
@@ -51,8 +50,11 @@ rustls-native-certs = "0.8"
 # Traceroute (ICMP packet parsing)
 pnet_packet = "0.35"
 
+# Clipboard (arboard) does not support Android. Gate it behind a platform
+# condition so the dependency is simply absent on Android targets, making
+# dep:arboard in the tui feature a harmless no-op there.
 [target.'cfg(not(target_os = "android"))'.dependencies]
-arboard = "3.3"
+arboard = { version = "3.3", optional = true }
 
 [[bin]]
 name = "cloudflare-speed-cli"
@@ -60,7 +62,7 @@ path = "src/main.rs"
 
 [features]
 default = ["tui"]
-tui = ["dep:ratatui", "dep:crossterm", "dep:ratatui-textarea"]
+tui = ["dep:ratatui", "dep:crossterm", "dep:arboard", "dep:ratatui-textarea"]
 
 # The profile that 'dist' will build with
 [profile.dist]
