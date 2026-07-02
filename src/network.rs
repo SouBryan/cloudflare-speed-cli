@@ -134,7 +134,7 @@ fn gather_default_network_info(
 
 /// Get the default network interface name for the given address family.
 /// `None` queries the IPv4 default route (the platform default).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn get_default_interface(family: Option<IpFamily>) -> Option<String> {
     // `ip -6 route show default` for IPv6; the v4 table otherwise.
     let route_args: &[&str] = if family == Some(IpFamily::V6) {
@@ -362,7 +362,7 @@ fn get_default_interface(family: Option<IpFamily>) -> Option<String> {
 }
 
 /// Check if interface is wireless
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn check_if_wireless(iface: &str) -> Option<bool> {
     // Check if /sys/class/net/<iface>/wireless exists
     let wireless_path = format!("/sys/class/net/{}/wireless", iface);
@@ -447,7 +447,7 @@ fn check_if_wireless(iface: &str) -> Option<bool> {
 }
 
 /// Get wireless SSID for an interface
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn get_wireless_ssid(iface: &str) -> Option<String> {
     // Try iwgetid first (most reliable)
     if let Ok(output) = Command::new("iwgetid").arg("-r").arg(iface).output() {
@@ -624,7 +624,7 @@ fn get_wireless_ssid(iface: &str) -> Option<String> {
 }
 
 /// Get MAC address of interface
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn get_interface_mac(iface: &str) -> Option<String> {
     let mac_path = format!("/sys/class/net/{}/address", iface);
     std::fs::read_to_string(mac_path)
