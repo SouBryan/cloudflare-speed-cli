@@ -2,7 +2,6 @@ use crate::engine::{EngineControl, TestEngine};
 use crate::model::{RunConfig, TestEvent};
 use anyhow::{Context, Result};
 use clap::Parser;
-use rand::RngCore;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -183,10 +182,11 @@ pub async fn run(args: Cli) -> Result<()> {
 }
 
 /// Generate a random measurement ID for the speed test.
-fn gen_meas_id() -> String {
+fn gen_meas_id() -> Result<String> {
     let mut b = [0u8; 8];
-    rand::thread_rng().fill_bytes(&mut b);
-    u64::from_le_bytes(b).to_string()
+    getrandom::getrandom(&mut b)
+        .map_err(|error| anyhow::anyhow!("failed to generate measurement ID: {error}"))?;
+    Ok(u64::from_le_bytes(b).to_string())
 }
 
 /// Build a `RunConfig` from CLI arguments.
@@ -240,7 +240,7 @@ pub fn build_config(args: &Cli) -> Result<RunConfig> {
 
     Ok(RunConfig {
         base_url: args.base_url.clone(),
-        meas_id: gen_meas_id(),
+        meas_id: gen_meas_id()?,
         comments: args.comments.clone(),
         download_bytes_per_req: args.download_bytes_per_req,
         upload_bytes_per_req: args.upload_bytes_per_req,

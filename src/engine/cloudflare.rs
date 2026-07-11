@@ -306,8 +306,11 @@ pub async fn fetch_locations(client: &CloudflareClient) -> Result<serde_json::Va
 
 pub fn map_colo_to_server(locations: &serde_json::Value, colo: &str) -> Option<String> {
     // Try to get location info from dynamic locations data
-    fn visit(v: &serde_json::Value, colo: &str) -> Option<serde_json::Value> {
-        match v {
+    fn visit<'a>(
+        value: &'a serde_json::Value,
+        colo: &str,
+    ) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+        match value {
             serde_json::Value::Array(a) => {
                 for x in a {
                     if let Some(f) = visit(x, colo) {
@@ -318,15 +321,11 @@ pub fn map_colo_to_server(locations: &serde_json::Value, colo: &str) -> Option<S
             }
             serde_json::Value::Object(m) => {
                 let keys = ["iata", "colo", "code", "id"];
-                let mut matched = false;
-                for k in keys {
-                    if m.get(k).and_then(|x| x.as_str()) == Some(colo) {
-                        matched = true;
-                        break;
-                    }
-                }
-                if matched {
-                    return Some(serde_json::Value::Object(m.clone()));
+                if keys
+                    .iter()
+                    .any(|key| m.get(*key).and_then(|x| x.as_str()) == Some(colo))
+                {
+                    return Some(m);
                 }
                 for (_, x) in m {
                     if let Some(f) = visit(x, colo) {
@@ -339,31 +338,50 @@ pub fn map_colo_to_server(locations: &serde_json::Value, colo: &str) -> Option<S
         }
     }
 
-    if let Some(obj) = visit(locations, colo) {
-        if let Some(m) = obj.as_object() {
-            let city = m
-                .get("city")
-                .and_then(|v| v.as_str())
-                .or_else(|| m.get("name").and_then(|v| v.as_str()));
-            let country = m
-                .get("country")
-                .and_then(|v| v.as_str())
-                .or_else(|| m.get("countryName").and_then(|v| v.as_str()));
+    if let Some(location) = visit(locations, colo) {
+        let city = location
+            .get("city")
+            .and_then(|v| v.as_str())
+            .or_else(|| location.get("name").and_then(|v| v.as_str()));
+        let country = location
+            .get("country")
+            .and_then(|v| v.as_str())
+            .or_else(|| location.get("countryName").and_then(|v| v.as_str()));
 
-            let mut parts: Vec<String> = Vec::new();
-            parts.push(colo.to_string());
-            if let Some(c) = city {
-                parts.push(c.to_string());
-            }
-            if let Some(c) = country {
-                parts.push(c.to_string());
-            }
-            if parts.len() >= 2 {
-                return Some(parts.join(" - "));
-            }
-        }
+        return match (city, country) {
+            (Some(city), Some(country)) => Some(format!("{colo} - {city} - {country}")),
+            (Some(city), None) => Some(format!("{colo} - {city}")),
+            (None, Some(country)) => Some(format!("{colo} - {country}")),
+            (None, None) => Some(colo.to_string()),
+        };
     }
 
     // Just return the colo code if no location data available
     Some(colo.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_nested_colo_without_consuming_locations() {
+        let locations = serde_json::json!({
+            "regions": [{ "iata": "GRU", "city": "Sao Paulo", "country": "Brazil" }]
+        });
+
+        assert_eq!(
+            map_colo_to_server(&locations, "GRU").as_deref(),
+            Some("GRU - Sao Paulo - Brazil")
+        );
+        assert!(locations.get("regions").is_some());
+    }
+
+    #[test]
+    fn falls_back_to_colo_when_location_is_missing() {
+        assert_eq!(
+            map_colo_to_server(&serde_json::json!([]), "GRU").as_deref(),
+            Some("GRU")
+        );
+    }
 }

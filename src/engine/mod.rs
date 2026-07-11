@@ -437,9 +437,9 @@ impl TestEngine {
             timestamp_utc: time::OffsetDateTime::now_utc()
                 .format(&time::format_description::well_known::Rfc3339)
                 .unwrap_or_else(|_| "now".into()),
-            base_url: self.cfg.base_url.clone(),
-            meas_id: self.cfg.meas_id.clone(),
-            comments: self.cfg.comments.clone(),
+            base_url: self.cfg.base_url,
+            meas_id: self.cfg.meas_id,
+            comments: self.cfg.comments,
             meta,
             server,
             idle_latency,

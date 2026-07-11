@@ -2,7 +2,6 @@ use crate::engine::network_bind::{self, IpFamily};
 use crate::model::{ExperimentalUdpSummary, RunConfig, TestEvent, TurnInfo};
 use crate::stats::{latency_summary_from_samples, OnlineStats};
 use anyhow::{anyhow, Context, Result};
-use rand::RngCore;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -196,7 +195,8 @@ pub async fn run_udp_like_loss_probe(
         sent += 1;
 
         let mut txid = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut txid);
+        getrandom::getrandom(&mut txid)
+            .map_err(|error| anyhow!("failed to generate STUN transaction ID: {error}"))?;
         txid_to_seq.insert(txid, seq);
         let pkt = build_stun_binding_request(txid);
 

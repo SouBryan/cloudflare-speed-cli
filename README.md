@@ -5,7 +5,7 @@
 # cloudflare-speed-cli
 
 [![Crates.io](https://img.shields.io/crates/v/cloudflare-speed-cli.svg)](https://crates.io/crates/cloudflare-speed-cli)
-[![Rust](https://img.shields.io/badge/rust-1.81+-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.88+-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
 A CLI tool that displays network speed test results from Cloudflare's speed test service in a TUI interface.
@@ -48,6 +48,17 @@ To install the latest unreleased version from git instead:
 ```bash
 cargo install --git https://github.com/kavehtehrani/cloudflare-speed-cli --features tui
 ```
+
+For servers and other constrained devices, install the headless build:
+
+```bash
+cargo install cloudflare-speed-cli --no-default-features --locked
+```
+
+This excludes the interactive TUI and clipboard stack. Text/JSON output, exports,
+speed tests, DNS/TLS diagnostics, UDP quality, IP comparison, proxies, interface
+binding, custom certificates, and traceroute remain available. `--locked` uses
+the dependency versions tested by this project.
 
 ### Homebrew
 

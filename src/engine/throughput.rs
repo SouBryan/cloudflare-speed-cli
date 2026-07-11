@@ -5,8 +5,8 @@ use crate::engine::wait_if_paused_or_cancelled;
 use crate::model::{LatencySummary, Phase, RunConfig, TestEvent, ThroughputSummary};
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use futures::{stream, StreamExt};
-use reqwest::StatusCode;
+use futures_util::{stream, StreamExt};
+use reqwest::{StatusCode, Url};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
@@ -18,6 +18,14 @@ use tokio::time::Instant;
 /// Chunk size for upload stream generation (64 KB)
 const UPLOAD_CHUNK_SIZE: u64 = 64 * 1024;
 const MIN_DOWNLOAD_BYTES_PER_REQ: u64 = 100_000;
+
+fn download_request_url(base_url: &Url, meas_id: &str, bytes_per_req: u64) -> Url {
+    let mut url = base_url.clone();
+    url.query_pairs_mut()
+        .append_pair("measId", meas_id)
+        .append_pair("bytes", &bytes_per_req.to_string());
+    url
+}
 
 fn throughput_summary(bytes: u64, duration: Duration, mbps_samples: &[f64]) -> ThroughputSummary {
     // Compute metrics using the same method as metrics.rs for consistency
@@ -86,13 +94,10 @@ pub async fn run_download_with_loaded_latency(
         let ev_dl = event_tx.clone();
 
         handles.push(tokio::spawn(async move {
-            while !stop2.load(Ordering::Relaxed) {
-                let mut url = base_url.clone();
-                url.query_pairs_mut()
-                    .append_pair("measId", &meas_id)
-                    .append_pair("bytes", &bytes_per_req.to_string());
+            let mut request_url = download_request_url(&base_url, &meas_id, bytes_per_req);
 
-                let resp = match http.get(url).send().await {
+            while !stop2.load(Ordering::Relaxed) {
+                let resp = match http.get(request_url.clone()).send().await {
                     Ok(r) => r,
                     Err(_) => {
                         errors2.fetch_add(1, Ordering::Relaxed);
@@ -106,6 +111,8 @@ pub async fn run_download_with_loaded_latency(
                         let next = (bytes_per_req / 2).max(MIN_DOWNLOAD_BYTES_PER_REQ);
                         if next < bytes_per_req {
                             bytes_per_req = next;
+                            request_url =
+                                download_request_url(&base_url, &meas_id, bytes_per_req);
                             let _ = ev_dl
                                 .send(TestEvent::Info {
                                     message: format!(
@@ -138,15 +145,17 @@ pub async fn run_download_with_loaded_latency(
     let ev2 = event_tx.clone();
     let paused2 = paused.clone();
     let cancel2 = cancel.clone();
-    let cfg2 = cfg.clone();
+    let latency_duration = cfg.download_duration;
+    let probe_interval_ms = cfg.probe_interval_ms;
+    let probe_timeout_ms = cfg.probe_timeout_ms;
     let lat_handle = tokio::spawn(async move {
         let res = run_latency_probes(
             &client2,
             Phase::Download,
             Some(Phase::Download),
-            cfg2.download_duration,
-            cfg2.probe_interval_ms,
-            cfg2.probe_timeout_ms,
+            latency_duration,
+            probe_interval_ms,
+            probe_timeout_ms,
             &ev2,
             paused2,
             cancel2,
@@ -232,6 +241,9 @@ pub async fn run_upload_with_loaded_latency(
     let total = Arc::new(AtomicU64::new(0));
     let errors = Arc::new(AtomicU64::new(0));
 
+    let chunk = Bytes::from(vec![0u8; UPLOAD_CHUNK_SIZE as usize]);
+    let full = cfg.upload_bytes_per_req / UPLOAD_CHUNK_SIZE;
+    let tail = cfg.upload_bytes_per_req % UPLOAD_CHUNK_SIZE;
     let mut handles = Vec::new();
     for _ in 0..cfg.concurrency {
         let http = client.http.clone();
@@ -240,18 +252,13 @@ pub async fn run_upload_with_loaded_latency(
         let stop2 = stop.clone();
         let total2 = total.clone();
         let errors2 = errors.clone();
-        let bytes_per_req = cfg.upload_bytes_per_req;
+        let chunk = chunk.clone();
 
         handles.push(tokio::spawn(async move {
             while !stop2.load(Ordering::Relaxed) {
                 // Generate upload body as a bounded stream of bytes.
                 // We count bytes as we *produce* chunks for reqwest. This is a close approximation
                 // of bytes put on the wire and produces stable realtime Mbps for the UI.
-                let chunk = Bytes::from(vec![0u8; UPLOAD_CHUNK_SIZE as usize]);
-
-                let full = bytes_per_req / UPLOAD_CHUNK_SIZE;
-                let tail = bytes_per_req % UPLOAD_CHUNK_SIZE;
-
                 let total2a = total2.clone();
                 let chunk_full = chunk.clone();
                 let s_full = stream::iter(0..full).map(move |_| {
@@ -285,15 +292,17 @@ pub async fn run_upload_with_loaded_latency(
     let ev2 = event_tx.clone();
     let paused2 = paused.clone();
     let cancel2 = cancel.clone();
-    let cfg2 = cfg.clone();
+    let latency_duration = cfg.upload_duration;
+    let probe_interval_ms = cfg.probe_interval_ms;
+    let probe_timeout_ms = cfg.probe_timeout_ms;
     let lat_handle = tokio::spawn(async move {
         let res = run_latency_probes(
             &client2,
             Phase::Upload,
             Some(Phase::Upload),
-            cfg2.upload_duration,
-            cfg2.probe_interval_ms,
-            cfg2.probe_timeout_ms,
+            latency_duration,
+            probe_interval_ms,
+            probe_timeout_ms,
             &ev2,
             paused2,
             cancel2,
@@ -376,4 +385,20 @@ pub async fn run_upload_with_loaded_latency(
     let _ = lat_handle.await;
 
     Ok((up, loaded_latency))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn download_url_contains_measurement_and_size() {
+        let base_url = Url::parse("https://example.com/__down").unwrap();
+        let url = download_request_url(&base_url, "run 1", 500_000);
+
+        assert_eq!(
+            url.as_str(),
+            "https://example.com/__down?measId=run+1&bytes=500000"
+        );
+    }
 }

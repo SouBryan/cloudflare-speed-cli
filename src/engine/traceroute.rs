@@ -7,7 +7,6 @@
 use super::network_bind::IpFamily;
 use crate::model::{TestEvent, TracerouteHop, TracerouteSummary};
 use anyhow::{Context, Result};
-use pnet_packet::icmp::IcmpTypes;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::io::ErrorKind;
 use std::mem::MaybeUninit;
@@ -21,6 +20,8 @@ const PROBES_PER_HOP: usize = 3;
 
 /// Timeout for each probe
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const ICMP_ECHO_REPLY: u8 = 0;
+const ICMP_ECHO_REQUEST: u8 = 8;
 
 /// Run traceroute to the destination.
 ///
@@ -139,7 +140,7 @@ async fn run_icmp_traceroute(
     let mut completed = false;
 
     for ttl in 1..=max_hops {
-        socket.set_ttl(ttl as u32)?;
+        socket.set_ttl_v4(ttl as u32)?;
 
         let mut rtts = Vec::new();
         let mut hop_ip: Option<IpAddr> = None;
@@ -183,7 +184,7 @@ async fn run_icmp_traceroute(
                         // IP header + ICMP header
                         // Safe to read since we received at least 28 bytes
                         let icmp_type = unsafe { recv_buf[20].assume_init() };
-                        if icmp_type == IcmpTypes::EchoReply.0 {
+                        if icmp_type == ICMP_ECHO_REPLY {
                             completed = true;
                         }
                     }
@@ -232,7 +233,7 @@ fn build_icmp_packet(id: u16, seq: u16) -> Vec<u8> {
     let mut packet = vec![0u8; 64];
 
     // ICMP header
-    packet[0] = IcmpTypes::EchoRequest.0; // Type
+    packet[0] = ICMP_ECHO_REQUEST; // Type
     packet[1] = 0; // Code
     packet[2] = 0; // Checksum (will be calculated)
     packet[3] = 0;
@@ -512,6 +513,16 @@ fn parse_hop_line(line: &str) -> Option<TracerouteHop> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builds_valid_echo_request() {
+        let packet = build_icmp_packet(0x1234, 0x5678);
+
+        assert_eq!(packet.len(), 64);
+        assert_eq!(packet[0], ICMP_ECHO_REQUEST);
+        assert_eq!(&packet[4..8], &[0x12, 0x34, 0x56, 0x78]);
+        assert_eq!(calculate_icmp_checksum(&packet), 0);
+    }
 
     #[test]
     fn parses_linux_with_hostname() {

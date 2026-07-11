@@ -2,6 +2,8 @@
 name = "cloudflare-speed-cli"
 version = "1.0.6"
 edition = "2021"
+rust-version = "1.88"
+resolver = "3"
 authors = ["kavehtehrani <codemonkey13x@gmail.com>"]
 description = "CLI tool for Cloudflare speed testing with TUI interface"
 license = "GPL-3.0"
@@ -26,35 +28,32 @@ bytes = "1.9.0"
 clap = { version = "4.5.23", features = ["derive"] }
 crossterm = { version = "0.29", optional = true, features = ["event-stream"] }
 dirs = "5.0.1"
-futures = "0.3.31"
+futures-util = { version = "0.3.31", default-features = false, features = ["async-await", "std"] }
 humantime-serde = "1.1.1"
 humantime = "2.1.0"
 if-addrs = "0.10"
-rand = "0.8.5"
+getrandom = "0.2.17"
 ratatui = { version = "0.30", optional = true, default-features = false, features = ["crossterm"] }
-reqwest = { version = "0.12.9", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "http2", "gzip", "brotli", "deflate", "json", "stream", "socks"] }
+reqwest = { version = "0.12.9", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "http2", "json", "stream", "socks"] }
 libc = "0.2"
-ratatui-textarea = { version = "0.9", optional = true, features = ["search"] }
+ratatui-textarea = { version = "0.9", optional = true, default-features = false, features = ["crossterm", "search"] }
 serde = { version = "1.0.216", features = ["derive"] }
 serde_json = "1.0.133"
-socket2 = { version = "0.5", features = ["all"] }
-time = { version = "0.3.37", features = ["formatting", "macros", "local-offset"] }
+socket2 = { version = "0.6", features = ["all"] }
+time = { version = "0.3.37", features = ["formatting"] }
 tokio = { version = "1.41.1", features = ["macros", "rt-multi-thread", "signal", "time", "sync", "net"] }
 
 # TLS handshake measurement
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 rustls-native-certs = "0.8"
-
-# Traceroute (ICMP packet parsing)
-pnet_packet = "0.35"
 
 # Clipboard (arboard) does not support Android. Gate it behind a platform
 # condition so the dependency is simply absent on Android targets, making
 # dep:arboard in the tui feature a harmless no-op there.
 [target.'cfg(not(target_os = "android"))'.dependencies]
-arboard = { version = "3.3", optional = true }
+arboard = { version = "3.3", optional = true, default-features = false }
 
 [[bin]]
 name = "cloudflare-speed-cli"
@@ -62,10 +61,16 @@ path = "src/main.rs"
 
 [features]
 default = ["tui"]
-tui = ["dep:ratatui", "dep:crossterm", "dep:arboard", "dep:ratatui-textarea"]
+tui = ["dep:ratatui", "dep:crossterm", "dep:arboard", "dep:ratatui-textarea", "time/local-offset"]
+
+# Keep cargo installs and release artifacts compact without sacrificing runtime
+# throughput or unwind-based terminal cleanup.
+[profile.release]
+codegen-units = 1
+lto = "fat"
+strip = "symbols"
 
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
-lto = "thin"
 

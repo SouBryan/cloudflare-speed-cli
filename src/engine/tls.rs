@@ -128,8 +128,11 @@ async fn connect_tcp(
     // Filter by the requested family if set; otherwise try all. `family`
     // already incorporates the bind IP's family, so binding stays consistent.
     let candidates: Vec<SocketAddr> = match family {
-        Some(f) => resolved.iter().copied().filter(|a| f.matches(a.ip())).collect(),
-        None => resolved.clone(),
+        Some(f) => resolved
+            .into_iter()
+            .filter(|a| f.matches(a.ip()))
+            .collect(),
+        None => resolved,
     };
 
     if candidates.is_empty() {
